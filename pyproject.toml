@@ -1,0 +1,13 @@
+[project]
+name = "load-theory"
+version = "0.1.0"
+description = "Theoretical model load analysis for future Ascend-style Cube/Vector NPUs"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["load_theory/tests"]
+pythonpath = ["."]

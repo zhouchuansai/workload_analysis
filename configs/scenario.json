@@ -1,0 +1,45 @@
+{
+  "name": "deepseek_v41_default",
+  "mode": "both",
+  "optimizer": "adamw",
+  "parallel": {
+    "tp": 8,
+    "ep": 64,
+    "pp": 8,
+    "dp": 16
+  },
+  "precision": {
+    "weight": {
+      "dtype": "fp8",
+      "bytes_per_element": 1
+    },
+    "expert_weight": {
+      "dtype": "fp4",
+      "bytes_per_element": 0.5
+    },
+    "activation": {
+      "dtype": "fp8",
+      "bytes_per_element": 1
+    },
+    "kv_cache": {
+      "dtype": "bf16",
+      "bytes_per_element": 2
+    },
+    "gradient": {
+      "dtype": "bf16",
+      "bytes_per_element": 2
+    }
+  },
+  "inference": {
+    "prefill_batch_size": 8,
+    "prefill_length": 4096,
+    "decode_batch_size": 128,
+    "decode_length": 512,
+    "context_length": 8192
+  },
+  "training": {
+    "global_batch_size": 512,
+    "seq_len": 8192,
+    "gradient_checkpointing": true
+  }
+}
