@@ -164,7 +164,8 @@ class Demand:
         return self.cube_flops + self.vector_flops
 
     @property
-    def total_memory_bytes(self) -> float:
+    def data_movement_bytes(self) -> float:
+        """Theoretical byte movement, not resident HBM capacity."""
         return (
             self.weight_bytes
             + self.kv_cache_bytes
@@ -173,8 +174,13 @@ class Demand:
         )
 
     @property
+    def total_memory_bytes(self) -> float:
+        """Backward-compatible alias for data_movement_bytes."""
+        return self.data_movement_bytes
+
+    @property
     def compute_memory_ratio(self) -> float:
-        return self.total_flops / self.total_memory_bytes if self.total_memory_bytes else 0.0
+        return self.total_flops / self.data_movement_bytes if self.data_movement_bytes else 0.0
 
     @property
     def compute_capacity_ratio(self) -> float:

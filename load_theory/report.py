@@ -15,16 +15,31 @@ METRICS = [
 ]
 
 
+def _format_value(value) -> str:
+    if isinstance(value, dict) and "value" in value and "unit" in value:
+        return f"{value['value']:.6g} {value['unit']}"
+    return f"{value:.6g}"
+
+
 def print_report(report: dict) -> None:
     print(f"Model: {report['model']}")
     for scenario in report["scenarios"]:
         print(f"\n[{scenario['name']}] {scenario['description']}")
         for metric in METRICS:
             value = scenario["metrics"][metric]
-            print(f"  {metric:44s} {value:.6g}")
-        print("  per-token demand:")
-        for key, value in scenario["per_token"].items():
-            print(f"    {key:28s} {value:.6g}")
+            print(f"  {metric:44s} {_format_value(value)}")
+        if "total" in scenario:
+            print("  end-to-end total demand:")
+            for key, value in scenario["total"].items():
+                print(f"    {key:28s} {_format_value(value)}")
+        elif "per_output_token" in scenario:
+            print("  per-output-token demand:")
+            for key, value in scenario["per_output_token"].items():
+                print(f"    {key:28s} {_format_value(value)}")
+        else:
+            print("  per-token demand:")
+            for key, value in scenario["per_token"].items():
+                print(f"    {key:28s} {_format_value(value)}")
 
 
 def save_json(data: object, path: str | Path) -> None:

@@ -12,7 +12,12 @@ from load_theory.core import (
     Precision,
     TrainingWorkload,
 )
-from load_theory.modeling import analyze_inference, analyze_training, model_weight_params
+from load_theory.modeling import (
+    _memory_value,
+    analyze_inference,
+    analyze_training,
+    model_weight_params,
+)
 from load_theory.core import optimizer_state_bytes_per_param
 from load_theory.scenario import load_scenario
 
@@ -36,9 +41,37 @@ def test_dense_weights_and_forward():
         model,
         InferenceWorkload(1, 16, 1, 4, 32, Parallel(tp=2), Precision(weight=2, kv_cache=2)),
     )
-    decode = report["scenarios"][1]["per_token"]
-    assert decode["active_weight_bytes"] == total * 2
+    decode = report["scenarios"][1]["per_output_token"]
+    assert "total" not in report["scenarios"][1]
+    assert decode["active_weight"]["value"] * 1e9 == total * 2
     assert decode["cube_gflops"] > decode["vector_gflops"]
+
+
+def test_prefill_is_end_to_end_prompt_to_first_token():
+    model = dense_model()
+    report = analyze_inference(
+        model,
+        InferenceWorkload(
+            prefill_batch_size=2,
+            prefill_length=16,
+            decode_batch_size=1,
+            decode_length=4,
+            context_length=32,
+            parallel=Parallel(),
+            precision=Precision(weight=2, kv_cache=2),
+        ),
+    )
+    prefill = report["scenarios"][0]
+    assert "per_prompt_token" not in prefill
+    assert "per_first_token" not in prefill
+    assert "per_token" not in prefill
+    assert prefill["total"]["total_gflops"] == prefill["metrics"]["total_gflops"]
+    assert prefill["description"].startswith("end-to-end prompt processing")
+    decode = report["scenarios"][1]
+    assert "per_output_token" in decode
+    assert "total" not in decode
+    assert "per_token" not in decode
+    assert decode["description"].startswith("average demand per output token")
 
 
 def test_moe_active_weight_is_smaller_than_total():
@@ -61,19 +94,19 @@ def test_moe_active_weight_is_smaller_than_total():
         model,
         InferenceWorkload(1, 16, 1, 4, 32, Parallel(tp=1, ep=4), Precision(weight=2, kv_cache=2)),
     )
-    decode = report["scenarios"][1]["per_token"]
-    assert decode["active_weight_bytes"] < decode["weight_bytes"]
-    assert decode["communication_bytes"] > 0
+    decode = report["scenarios"][1]["per_output_token"]
+    assert decode["active_weight"]["value"] < decode["weight"]["value"]
+    assert decode["communication"]["value"] > 0
 
 
-def test_training_has_optimizer_and_gradient_bytes():
+def test_training_has_optimizer_and_gradient_states():
     report = analyze_training(
         dense_model(),
         TrainingWorkload(8, 128, parallel=Parallel(dp=2), precision=Precision(weight=2)),
     )
     per_token = report["scenarios"][0]["per_token"]
-    assert per_token["gradient_bytes"] > 0
-    assert per_token["optimizer_bytes"] > 0
+    assert per_token["gradient_state"]["value"] > 0
+    assert per_token["optimizer_state"]["value"] > 0
     assert report["scenarios"][0]["metrics"]["total_gflops"] > 0
     assert "field_notes" in report
 
@@ -120,3 +153,8 @@ def test_scenario_config_is_loaded_and_applied():
     )
     updated = scenario.apply_expert_precision(model)
     assert updated.mlp.expert_precision_bytes == 0.5
+
+
+def test_memory_units_switch_from_gb_to_tb():
+    assert _memory_value(999_999_999_999) == {"value": 999.999999999, "unit": "GB"}
+    assert _memory_value(1_000_000_000_000) == {"value": 1.0, "unit": "TB"}

@@ -22,17 +22,28 @@ class ScenarioReport:
     total: Demand
     per_token: Demand
     metrics: dict
+    per_first_token: Demand | None = None
 
     def as_dict(self) -> dict:
-        total = _demand_as_json(self.total)
-        per_token = _demand_as_json(self.per_token)
-        return {
+        result = {
             "name": self.name,
             "description": self.description,
-            "total": total,
-            "per_token": per_token,
             "metrics": self.metrics,
         }
+        if self.name == "prefill":
+            result["total"] = _demand_as_json(self.total)
+        elif self.name == "decode":
+            result["per_output_token"] = _demand_as_json(self.per_token)
+        else:
+            result["per_token"] = _demand_as_json(self.per_token)
+        return result
+
+
+def _memory_value(byte_count: float) -> dict:
+    use_tb = byte_count >= 1e12
+    divisor = 1e12 if use_tb else 1e9
+    unit = "TB" if use_tb else "GB"
+    return {"value": byte_count / divisor, "unit": unit}
 
 
 def _demand_as_json(demand: Demand) -> dict:
@@ -40,14 +51,14 @@ def _demand_as_json(demand: Demand) -> dict:
         "cube_gflops": demand.cube_flops / 1e9,
         "vector_gflops": demand.vector_flops / 1e9,
         "total_gflops": demand.total_flops / 1e9,
-        "weight_bytes": demand.weight_bytes,
-        "active_weight_bytes": demand.active_weight_bytes,
-        "kv_cache_bytes": demand.kv_cache_bytes,
-        "activation_bytes": demand.activation_bytes,
-        "communication_bytes": demand.communication_bytes,
-        "optimizer_bytes": demand.optimizer_bytes,
-        "gradient_bytes": demand.gradient_bytes,
-        "total_memory_bytes": demand.total_memory_bytes,
+        "weight": _memory_value(demand.weight_bytes),
+        "active_weight": _memory_value(demand.active_weight_bytes),
+        "kv_cache": _memory_value(demand.kv_cache_bytes),
+        "activation": _memory_value(demand.activation_bytes),
+        "communication": _memory_value(demand.communication_bytes),
+        "optimizer_state": _memory_value(demand.optimizer_bytes),
+        "gradient_state": _memory_value(demand.gradient_bytes),
+        "data_movement": _memory_value(demand.data_movement_bytes),
     }
     return result
 
@@ -56,23 +67,25 @@ def json_field_notes() -> dict:
     return {
         "name": "场景名称：prefill、decode 或 training_step",
         "description": "场景对应的计算批次说明",
-        "total": "整个场景批次的聚合需求；通信量与访存量单位为 byte，计算量单位为 GFLOPs",
-        "per_token": "按单 token 归一化后的需求；通信量与访存量单位为 byte，计算量单位为 GFLOPs",
+        "total": "prefill 场景从处理整段 prompt 到产出 first token 的端到端需求",
+        "per_output_token": "decode 场景平均输出单个 token 的需求；上下文长度按 decode_length 求平均",
+        "per_token": "training 场景按训练 token 归一化后的需求",
+        "prefill_total_only": "prefill 场景仅输出端到端 total 口径，不输出 prompt token 或 first token 归一化字段",
         "metrics": "核心派生指标；比值均为无量纲或 FLOPs/byte",
         "cube_gflops": "Cube 单元理论计算需求，10^9 FLOPs；主要覆盖 GEMM/QK^T/AV 等矩阵乘",
         "vector_gflops": "Vector 单元理论计算需求，10^9 元素级操作数；主要覆盖 Norm/激活/Softmax 相关操作",
         "total_gflops": "Cube GFLOPs + Vector GFLOPs",
-        "weight_bytes": "模型全部权重存储/读放量，单位 byte；MoE 为全部 expert 权重",
-        "active_weight_bytes": "单 token 实际激活的权重读放量，单位 byte；MoE 为 top-k expert + shared expert + router",
-        "kv_cache_bytes": "KV cache 读/写量，单位 byte；依赖上下文长度",
-        "activation_bytes": "激活值访存量估计，单位 byte",
-        "communication_bytes": "TP/EP/PP/DP 理论通信字节数，单位 byte",
-        "optimizer_bytes": "训练 optimizer state 大小，单位 byte；AdamW 默认 FP32 master weight + m/v，共 12 bytes/param",
-        "gradient_bytes": "训练梯度存储/同步相关大小，单位 byte",
-        "total_memory_bytes": "weight + KV + activation + communication 的访存流量合计，不含 optimizer/gradient 状态",
+        "weight": "模型全部权重大小或读放估计；对象包含 value 和 unit，低于 1TB 用 GB，达到 1TB 用 TB；MoE 为全部 expert 权重",
+        "active_weight": "单 token 实际激活的权重大小；对象包含 value 和 unit，低于 1TB 用 GB，达到 1TB 用 TB",
+        "kv_cache": "KV cache 访存量；decode 为读放量，prefill 为 causal 读放量 + 全量写入量；对象包含 value 和 unit",
+        "activation": "激活值访存量估计；对象包含 value 和 unit",
+        "communication": "TP/EP/PP/DP 理论通信字节数；对象包含 value 和 unit",
+        "optimizer_state": "训练 optimizer state 大小；AdamW 默认 FP32 master weight + m/v，共 12 bytes/param；对象包含 value 和 unit",
+        "gradient_state": "训练梯度状态大小；对象包含 value 和 unit",
+        "data_movement": "weight + KV + activation + communication 的理论数据搬移量，不是 HBM 常驻容量；对象包含 value 和 unit",
         "total_gflops_metric": "核心指标中的总计算需求，单位 GFLOPs",
         "cube_vector_ratio": "Cube 计算需求 / Vector 计算需求；越大表示越依赖矩阵算力",
-        "compute_memory_ratio_flops_per_byte": "计算访存比 = total FLOPs / total memory bytes",
+        "compute_memory_ratio_flops_per_byte": "计算访存比 = total FLOPs / 理论数据搬移 bytes",
         "compute_capacity_ratio_flops_per_byte": "算容比 = total FLOPs / 全部权重大小，单位 FLOPs/byte",
         "compute_capacity_ratio_active_flops_per_byte": "激活算容比 = total FLOPs / 单 token 激活权重大小，单位 FLOPs/byte",
         "warnings": "当前近似建模未覆盖的模型组件或公式假设提示",
@@ -185,7 +198,11 @@ def _vector_flops_per_token(model: Model) -> int:
         mlp = 3 * model.mlp.intermediate_size
     else:
         mlp = model.mlp.active_experts * model.mlp.intermediate_size
-    return model.num_layers * (layernorm + mlp) + 8 * model.vocab_size
+    return model.num_layers * (layernorm + mlp)
+
+
+def _lm_head_vector_flops(model: Model) -> int:
+    return 8 * model.vocab_size
 
 
 def _communication_bytes_per_token(
@@ -210,18 +227,20 @@ def _base_demand(
     model: Model,
     context_length: int,
     precision,
+    include_lm_head: bool = True,
 ) -> Demand:
     total_weight, active_weight = model_weight_bytes(model, precision)
     cube_params = _attention_gemm_params_per_token(model) + _mlp_gemm_params_per_token(model)
     cube_flops = model.num_layers * 2 * cube_params
-    if not model.tie_word_embeddings:
+    if include_lm_head and not model.tie_word_embeddings:
         cube_flops += 2 * model.hidden_size * model.vocab_size
     attention_context_flops = model.num_layers * 4 * context_length * model.attention.num_heads * model.attention.head_dim
     activation = model.num_layers * 4 * model.hidden_size * precision.activation
     kv = kv_bytes_per_token_per_layer(model, precision.kv_cache) * model.num_layers * context_length
     return Demand(
         cube_flops=cube_flops + attention_context_flops,
-        vector_flops=_vector_flops_per_token(model),
+        vector_flops=_vector_flops_per_token(model)
+        + (_lm_head_vector_flops(model) if include_lm_head else 0),
         weight_bytes=total_weight,
         active_weight_bytes=active_weight,
         kv_cache_bytes=kv,
@@ -235,7 +254,7 @@ def _demand_metrics(demand: Demand) -> dict:
         "cube_gflops": demand.cube_flops / 1e9,
         "vector_gflops": demand.vector_flops / 1e9,
         "cube_vector_ratio": demand.cube_vector_ratio,
-        "total_memory_bytes": demand.total_memory_bytes,
+        "data_movement": _memory_value(demand.data_movement_bytes),
         "compute_memory_ratio_flops_per_byte": demand.compute_memory_ratio,
         "compute_capacity_ratio_flops_per_byte": demand.compute_capacity_ratio,
         "compute_capacity_ratio_active_flops_per_byte": demand.compute_capacity_ratio_active,
@@ -244,28 +263,82 @@ def _demand_metrics(demand: Demand) -> dict:
 
 def analyze_inference(model: Model, workload: InferenceWorkload) -> dict:
     workload.parallel.validate()
-    prefill = _base_demand(model, workload.prefill_length, workload.precision)
-    decode = _base_demand(model, workload.context_length, workload.precision)
-    prefill.communication_bytes = _communication_bytes_per_token(
+    prefill_per_prompt_token = _base_demand(
+        model, 0, workload.precision, include_lm_head=False
+    )
+    average_decode_context_length = (
+        workload.context_length + (workload.decode_length - 1) / 2
+    )
+    decode = _base_demand(model, average_decode_context_length, workload.precision)
+    prefill_per_prompt_token.communication_bytes = _communication_bytes_per_token(
         model, workload.parallel, workload.precision.activation, False
     )
-    decode.communication_bytes = prefill.communication_bytes
+    decode.communication_bytes = prefill_per_prompt_token.communication_bytes
     prefill_tokens = workload.prefill_batch_size * workload.prefill_length
     decode_step_tokens = workload.decode_batch_size
-    prefill_total = Demand(**{key: value * prefill_tokens for key, value in asdict(prefill).items()})
+
+    prompt_length = workload.prefill_length
+    batch_size = workload.prefill_batch_size
+    heads = model.attention.num_heads
+    head_dim = model.attention.head_dim
+    causal_attention_flops = (
+        batch_size
+        * model.num_layers
+        * 2
+        * heads
+        * head_dim
+        * prompt_length
+        * (prompt_length + 1)
+    )
+    lm_head_cube_flops = 0 if model.tie_word_embeddings else 2 * model.hidden_size * model.vocab_size
+    kv_bytes_per_layer = kv_bytes_per_token_per_layer(model, workload.precision.kv_cache)
+    kv_write_bytes = batch_size * prompt_length * model.num_layers * kv_bytes_per_layer
+    kv_read_bytes = (
+        batch_size
+        * model.num_layers
+        * kv_bytes_per_layer
+        * prompt_length
+        * (prompt_length + 1)
+        / 2
+    )
+
+    prefill_total = Demand(
+        **{
+            key: value * prefill_tokens
+            for key, value in asdict(prefill_per_prompt_token).items()
+        }
+    )
+    prefill_total.cube_flops += causal_attention_flops + batch_size * lm_head_cube_flops
+    prefill_total.vector_flops += batch_size * _lm_head_vector_flops(model)
+    prefill_total.kv_cache_bytes = kv_write_bytes + kv_read_bytes
+    prefill_total.weight_bytes = prefill_per_prompt_token.weight_bytes
+    prefill_total.active_weight_bytes = prefill_per_prompt_token.active_weight_bytes
+
+    prefill_per_prompt_token = Demand(
+        **{key: value / prefill_tokens for key, value in asdict(prefill_total).items()}
+    )
+    prefill_per_prompt_token.weight_bytes = prefill_total.weight_bytes
+    prefill_per_prompt_token.active_weight_bytes = prefill_total.active_weight_bytes
+    prefill_per_first_token = Demand(
+        **{key: value / batch_size for key, value in asdict(prefill_total).items()}
+    )
+    prefill_per_first_token.weight_bytes = prefill_total.weight_bytes
+    prefill_per_first_token.active_weight_bytes = prefill_total.active_weight_bytes
+
     decode_total = Demand(**{key: value * decode_step_tokens for key, value in asdict(decode).items()})
 
     reports = [
         ScenarioReport(
             "prefill",
-            "one full prefill batch",
+            "end-to-end prompt processing through first output token for one batch",
             prefill_total,
-            prefill,
-            _demand_metrics(prefill),
+            prefill_per_prompt_token,
+            _demand_metrics(prefill_total),
+            prefill_per_first_token,
         ),
         ScenarioReport(
             "decode",
-            "one autoregressive decode step",
+            "average demand per output token across decode_length autoregressive steps",
             decode_total,
             decode,
             _demand_metrics(decode),

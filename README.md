@@ -10,8 +10,8 @@
 - 分别计算 prefill、decode 和 training。
 - 输出 Cube/Vector 计算需求、访存、KV cache、通信量；对外报告统一使用 GFLOPs。
 - 输出：
-  - 计算访存比：`total_flops / total_memory_bytes`
-  - 算容比：`total_flops / total_weight_bytes`
+  - 计算访存比：`total_flops / data_movement_bytes`
+  - 算容比：`total_flops / weight_bytes`
   - 激活算容比：`total_flops / active_weight_bytes`
   - Cube/Vector 比例。
 - 支持 TP / EP / PP / DP 的理论通信字节数。
@@ -64,6 +64,46 @@ CLI 参数可以在 scenario 基础上覆盖，例如：
 
 ## 指标口径
 
+### Prefill 口径
+
+`prefill` 表示端到端处理一段 prompt 并产出第一个输出 token 的阶段：
+
+1. 对整段 prompt 做一次 forward。
+2. 按 causal attention 处理所有 prompt token。
+3. 写入整段 prompt 的 KV cache。
+4. 只对每个序列的最后一个位置做 LM head，产出 first token。
+
+prefill JSON 报告只提供端到端口径：
+
+- `total`：整个 prefill batch 的端到端需求。
+
+不输出 `per_prompt_token` 或 `per_first_token` 归一化字段；所有 prefill 指标均基于该端到端阶段计算。
+
+当前 causal attention 计算采用：
+
+```text
+F_attention = 2 × L × H × h × S × (S + 1)
+```
+
+而不是把每个 prompt token 都按完整上下文 `S` 计算。
+
+### Decode 口径
+
+`decode` 表示输出单个 token 的阶段。JSON 只输出 `per_output_token`：
+
+```text
+per_output_token = 平均输出一个 token 的需求
+```
+
+当 `decode_length > 1` 时，上下文长度按 autoregressive 过程求平均：
+
+```text
+average_context =
+    context_length + (decode_length - 1) / 2
+```
+
+因此 decode 指标反映的是整段输出过程中的平均单 token 负载，而不是整个 decode batch 的聚合负载。
+
 JSON 本身不支持注释，因此报告末尾输出 `field_notes` 字段，逐项说明每个字段的含义和单位。
 
 ### Cube GFLOPs
@@ -74,22 +114,38 @@ JSON 本身不支持注释，因此报告末尾输出 `field_notes` 字段，逐
 
 RMSNorm、SwiGLU、softmax 相关非矩阵操作的元素级操作数，输出单位为 `10^9 vector ops`。它不是 Cube 计算量的替代品，而是昇腾 Vector 单元的独立负载。
 
-### 访存
+### 数据搬移与内存单位
 
-拆分为：
+JSON 中的内存/字节类字段统一输出为对象：
 
-- `weight_bytes`：模型总权重大小。
-- `active_weight_bytes`：单 token 实际激活的权重大小。
-- `kv_cache_bytes`：上下文 KV 读/写量。
-- `activation_bytes`：激活访存。
-- `communication_bytes`：TP/EP/PP/DP 理论通信量。
+```json
+{
+  "value": 123.456,
+  "unit": "GB"
+}
+```
+
+默认单位为 `GB`；当字节数达到或超过 `1 TB` 时，单位切换为 `TB`。
+
+主要字段包括：
+
+- `weight`：模型总权重大小/读放估计。
+- `active_weight`：单 token 实际激活的权重大小。
+- `kv_cache`：KV cache 访存量。
+- `activation`：激活值访存量。
+- `communication`：TP/EP/PP/DP 理论通信量。
+- `optimizer_state`：训练 optimizer state。
+- `gradient_state`：训练梯度状态。
+- `data_movement`：weight + KV + activation + communication 的理论数据搬移量。
+
+`data_movement` 不是 HBM 常驻容量，而是理论数据搬移量。当前版本没有单独输出 HBM 常驻容量；如需评估容量，应另行组合模型权重、KV cache 状态、activation 状态和训练状态。
 
 ### 算容比
 
 本仓库使用：
 
 ```text
-compute_capacity_ratio = total_flops / total_weight_bytes
+compute_capacity_ratio = total_flops / weight_bytes
 ```
 
 MoE 另外输出：
@@ -112,7 +168,7 @@ compute_capacity_ratio_active = total_flops / active_weight_bytes
 
 - 训练总 FLOPs 近似为 `3 × forward FLOPs`。
 - AdamW 状态按 `4 bytes master weight + 8 bytes m/v` 计算。
-- `gradient_bytes` 和 `optimizer_bytes` 是训练状态大小，不进入 `total_memory_bytes` 的访存流量口径。
+- `gradient_state` 和 `optimizer_state` 是训练状态大小，不进入 `data_movement` 的数据搬移口径。
 - TP all-reduce 使用环状算法字节量 `2 × (N-1) / N × message_size`。
 - MoE EP 通信按 dispatch + combine 估算。
 - Activation checkpointing 使用平方根重计算近似。
