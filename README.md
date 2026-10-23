@@ -8,6 +8,7 @@
 - 自动解析本地 DeepSeek V4.1 `config.json`。
 - 使用 `configs/scenario.json` 统一配置 workload、并行策略、精度和 optimizer。
 - 分别计算 prefill、decode 和 training。
+- 支持多轮串行 Agent 任务的端到端推理负载建模。
 - 输出 Cube/Vector 计算需求、访存、KV cache、通信量；对外报告统一使用 GFLOPs。
 - 输出：
   - 计算访存比：`total_flops / data_movement_bytes`
@@ -31,6 +32,69 @@
 /opt/anaconda3/envs/torch/bin/python -m load_theory.examples.deepseek_v41
 ```
 
+## Agent 端到端推理
+
+Agent 任务由多轮串行模型交互组成。每轮分别建模当前完整 prompt 的 prefill，以及 `output_length` 个输出 token 的 decode，最后把所有轮次需求累加成任务级端到端结果。
+
+```bash
+/opt/anaconda3/envs/torch/bin/python -m load_theory.cli models/deepseek-v4.1/config.json \
+  --scenario configs/scenario.json \
+  --mode agent \
+  --agent-scenario configs/agent_scenario.json \
+  --json reports/deepseek_agent_load_report.json
+```
+
+也可以运行：
+
+```bash
+/opt/anaconda3/envs/torch/bin/python -m load_theory.agent.example
+```
+
+`configs/agent_scenario.json` 中每轮包含：
+
+- `context_before_length`：本轮之前已经存在的上下文长度。
+- `new_input_length`：本轮新增输入 token 数。
+- `output_length`：本轮模型输出 token 数。
+- `cached_length`：本轮可复用的已计算前缀长度；可精确描述多轮 Agent 的共享上下文。
+
+每轮的 `prompt_length = context_before_length + new_input_length`。若 `cached_length` 小于该轮 prompt 长度，则仅计算剩余 suffix，同时从 cache 读取命中前缀。
+
+Agent 任务级 `total` 等于：
+
+```text
+sum(round_prefill_total + decode_per_output_token × batch_size × output_length)
+```
+
+`cache_load_scope` 控制 cache 搬移计费方式：
+
+- `per_round`：每轮需要从 host/peer/remote/disk 搬入 cache 时都计一次。
+- `once`：整个 Agent 任务只计一次，适合远端 cache 搬入后常驻本地 HBM 的场景。
+- `none`：不计 cache 搬移量，仅保留计算和常规访存。
+
+Agent 中的 `weight` 不是每轮从 host/remote 重新装载一份模型权重，而是 HBM 到 Cube/Vector 的理论读放量。decode 阶段按每个 decode step 读取一次激活权重，同一 batch 内多条序列共享这次读放，不按序列数重复放大。prefill 阶段仍按一次 forward 的权重访问上界估计。若要分析服务冷启动的权重装载量，应单独按模型权重大小计一次，当前 `cache_load` 只描述 KV cache 的额外搬入。
+
+Agent report 单独输出 `capacity`：
+
+- `weight_hbm`：全量模型权重 HBM 常驻容量，不随轮次累计。
+- `active_weight`：单 token 激活权重容量下限。
+
+`weight` 仍表示 HBM 到计算单元的理论读放；它是带宽需求，不是容量需求。若只关心模型是否放得下，应查看 `capacity.weight_hbm`，而不是累加每轮 `weight`。
+
+Agent report 的 prefill 归一化指标分为两类：
+
+- `prefill_cube_gflops_per_computed_prompt_token`：平均每个实际参与计算的 prompt token 的 Cube 计算量。
+- `prefill_cube_gflops_per_first_token`：平均每次产出 first token 的 prefill 端到端 Cube 计算量。
+
+前者用于分析 prompt 计算强度，后者用于分析一次 prefill 调用的端到端需求。
+
+每轮 Agent 交互还会输出 `dag`：
+
+- `nodes`：`source`、每轮 `prefill`、每轮 `decode`、`sink`。
+- `edges`：`task_start`、`first_token`、`context`、`task_end`。
+- `depends_on`：可在 `turns[]` 中显式声明上游轮次；未声明时按输入顺序串行连接。
+
+CLI 的 JSON 输出与普通推理/训练报告一致，外层是一个 report 数组；Agent report 位于数组第一个元素。报告末尾的 `field_notes` 会解释 Agent 专属字段和既有需求字段的含义。
+
 ## Scenario 配置
 
 `configs/scenario.json` 是模型无关的统一配置文件，包含：
@@ -40,6 +104,34 @@
 - `inference`：prefill batch / length，decode batch / length，context length。
 - `training`：global batch size、sequence length、gradient checkpointing。
 - `optimizer`：默认 `adamw`。
+
+`inference.cache` 表示 prompt 前缀 KV cache 策略。默认不命中、cache 常驻 HBM，因此不产生额外加载量：
+
+```json
+{
+  "inference": {
+    "cache": {
+      "hit_rate": 0.0,
+      "source": "hbm",
+      "load_required": false,
+      "entry_count": 8,
+      "block_size": 1,
+      "compression_ratio": 1.0
+    }
+  }
+}
+```
+
+字段含义：
+
+- `hit_rate`：prompt 前缀 KV cache 命中率。
+- `source`：cache 所在位置，支持 `hbm`、`host_memory`、`peer_npu`、`remote_node`、`disk`。
+- `load_required`：是否需要把 cache 搬入本地 HBM。
+- `entry_count`：本 batch 中需要加载的独立 cache 前缀数量；多条请求共享同一个系统提示词时可设为 1。
+- `block_size`：cache block 粒度。
+- `compression_ratio`：cache 压缩后的字节数比例，`1.0` 表示不压缩。
+
+Agent 场景通常存在稳定系统提示词和多轮共享上下文，可将该值设置为较高水平，例如 `0.6` 到 `0.95`。
 
 暂不建模量化 scale 的额外存储开销。
 
@@ -72,6 +164,29 @@ CLI 参数可以在 scenario 基础上覆盖，例如：
 2. 按 causal attention 处理所有 prompt token。
 3. 写入整段 prompt 的 KV cache。
 4. 只对每个序列的最后一个位置做 LM head，产出 first token。
+
+如果启用 prompt 前缀 KV cache，则命中的前缀不参与 prefill forward 计算，只作为已有 KV 供未命中的 suffix attention 读取。为保证能产出 first token，至少保留最后一个 prompt token 参与计算：
+
+```text
+raw_cached_length = floor((prompt_length - 1) × hit_rate)
+cached_length = floor(raw_cached_length / block_size) × block_size
+computed_length = prompt_length - cached_length
+```
+
+当 `cache_hit_rate = 1.0` 时，只计算最后一个 prompt token，并用完整 cached KV 生成 first token。
+
+如果 cache 不在 HBM 中且 `load_required = true`，额外加载量为：
+
+```text
+cache_load_bytes =
+    entry_count
+  × cached_length
+  × num_layers
+  × kv_bytes_per_token_per_layer
+  × compression_ratio
+```
+
+`cache_load` 只计入 prefill 的端到端数据搬移量，decode 场景为 0。
 
 prefill JSON 报告只提供端到端口径：
 
@@ -134,9 +249,10 @@ JSON 中的内存/字节类字段统一输出为对象：
 - `kv_cache`：KV cache 访存量。
 - `activation`：激活值访存量。
 - `communication`：TP/EP/PP/DP 理论通信量。
+- `cache_load`：从 host/peer/remote/disk 等位置搬入 HBM 的 prompt KV cache。
 - `optimizer_state`：训练 optimizer state。
 - `gradient_state`：训练梯度状态。
-- `data_movement`：weight + KV + activation + communication 的理论数据搬移量。
+- `data_movement`：weight + KV + activation + communication + cache_load 的理论数据搬移量。
 
 `data_movement` 不是 HBM 常驻容量，而是理论数据搬移量。当前版本没有单独输出 HBM 常驻容量；如需评估容量，应另行组合模型权重、KV cache 状态、activation 状态和训练状态。
 

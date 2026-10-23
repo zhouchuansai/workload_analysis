@@ -35,7 +35,15 @@
     "prefill_length": 4096,
     "decode_batch_size": 128,
     "decode_length": 512,
-    "context_length": 8192
+    "context_length": 8192,
+    "cache": {
+      "hit_rate": 0.0,
+      "source": "hbm",
+      "load_required": false,
+      "entry_count": 8,
+      "block_size": 1,
+      "compression_ratio": 1.0
+    }
   },
   "training": {
     "global_batch_size": 512,

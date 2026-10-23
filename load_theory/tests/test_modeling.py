@@ -3,6 +3,7 @@ import pathlib
 from load_theory.adapters import load_deepseek_config
 from load_theory.core import (
     AttentionKind,
+    CacheSpec,
     AttentionSpec,
     InferenceWorkload,
     MLPSpec,
@@ -74,6 +75,72 @@ def test_prefill_is_end_to_end_prompt_to_first_token():
     assert decode["description"].startswith("average demand per output token")
 
 
+def test_prefill_cache_hit_rate_reduces_computed_prompt():
+    model = dense_model()
+    workload = InferenceWorkload(
+        prefill_batch_size=2,
+        prefill_length=16,
+        decode_batch_size=1,
+        decode_length=4,
+        context_length=32,
+            cache=CacheSpec(hit_rate=0.5),
+        precision=Precision(weight=2, kv_cache=2),
+    )
+    report = analyze_inference(model, workload)
+    prefill = report["scenarios"][0]
+    cache = prefill["cache"]
+    assert cache["hit_rate"] == 0.5
+    assert cache["cached_prompt_length_per_sequence"] == 7
+    assert cache["computed_prompt_length_per_sequence"] == 9
+    assert cache["cached_prompt_tokens"] == 14
+    assert cache["computed_prompt_tokens"] == 18
+    assert prefill["total"]["cache_load"] == {"value": 0.0, "unit": "GB"}
+
+    no_cache = analyze_inference(
+        model,
+        InferenceWorkload(
+            prefill_batch_size=2,
+            prefill_length=16,
+            decode_batch_size=1,
+            decode_length=4,
+            context_length=32,
+            precision=Precision(weight=2, kv_cache=2),
+        ),
+    )["scenarios"][0]
+    assert prefill["total"]["cube_gflops"] < no_cache["total"]["cube_gflops"]
+
+
+def test_distributed_cache_load_uses_entry_count_blocks_and_compression():
+    model = dense_model()
+    report = analyze_inference(
+        model,
+        InferenceWorkload(
+            prefill_batch_size=8,
+            prefill_length=16,
+            decode_batch_size=1,
+            decode_length=4,
+            context_length=32,
+            cache=CacheSpec(
+                hit_rate=0.9,
+                source="remote_node",
+                load_required=True,
+                entry_count=2,
+                block_size=4,
+                compression_ratio=0.5,
+            ),
+            precision=Precision(weight=2, kv_cache=2),
+        ),
+    )
+    prefill = report["scenarios"][0]
+    cache = prefill["cache"]
+    assert cache["cached_prompt_length_per_sequence"] == 12
+    assert cache["computed_prompt_length_per_sequence"] == 4
+    assert cache["entry_count"] == 2
+    assert cache["cache_load"] == {"value": 6.144e-6, "unit": "GB"}
+    assert prefill["total"]["cache_load"] == cache["cache_load"]
+    assert prefill["total"]["data_movement"]["value"] > prefill["total"]["kv_cache"]["value"]
+
+
 def test_moe_active_weight_is_smaller_than_total():
     model = Model(
         name="moe-test",
@@ -95,7 +162,9 @@ def test_moe_active_weight_is_smaller_than_total():
         InferenceWorkload(1, 16, 1, 4, 32, Parallel(tp=1, ep=4), Precision(weight=2, kv_cache=2)),
     )
     decode = report["scenarios"][1]["per_output_token"]
-    assert decode["active_weight"]["value"] < decode["weight"]["value"]
+    prefill = report["scenarios"][0]["total"]
+    assert decode["active_weight"]["value"] == decode["weight"]["value"]
+    assert prefill["active_weight"]["value"] < prefill["weight"]["value"]
     assert decode["communication"]["value"] > 0
 
 
@@ -142,6 +211,14 @@ def test_scenario_config_is_loaded_and_applied():
     assert scenario.precision.kv_cache == 2
     assert scenario.precision.gradient == 2
     assert scenario.parallel == Parallel(tp=8, ep=64, pp=8, dp=16)
+    assert scenario.inference.cache == CacheSpec(
+        hit_rate=0.0,
+        source="hbm",
+        load_required=False,
+        entry_count=8,
+        block_size=1,
+        compression_ratio=1.0,
+    )
     assert scenario.expert_precision_bytes == 0.5
     assert optimizer_state_bytes_per_param("adamw") == 12
 

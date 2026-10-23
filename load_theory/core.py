@@ -90,6 +90,40 @@ class MLPSpec:
         return self.topk + self.num_shared_experts
 
 
+CACHE_SOURCES = frozenset({"hbm", "host_memory", "peer_npu", "remote_node", "disk"})
+
+
+@dataclass(frozen=True)
+class CacheSpec:
+    """Prompt-prefix KV cache policy for inference."""
+
+    hit_rate: float = 0.0
+    source: str = "hbm"
+    load_required: bool = False
+    entry_count: Optional[int] = None
+    block_size: int = 1
+    compression_ratio: float = 1.0
+    cached_length: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.source not in CACHE_SOURCES:
+            raise ValueError(
+                f"cache.source must be one of {sorted(CACHE_SOURCES)}, got {self.source!r}"
+            )
+        if not 0.0 <= self.hit_rate <= 1.0:
+            raise ValueError("cache.hit_rate must be in [0, 1]")
+        if self.source == "hbm" and self.load_required:
+            raise ValueError("cache.load_required must be false when cache.source is hbm")
+        if self.entry_count is not None and self.entry_count <= 0:
+            raise ValueError("cache.entry_count must be positive")
+        if self.block_size <= 0:
+            raise ValueError("cache.block_size must be positive")
+        if self.cached_length is not None and self.cached_length < 0:
+            raise ValueError("cache.cached_length must be non-negative")
+        if not 0.0 < self.compression_ratio <= 1.0:
+            raise ValueError("cache.compression_ratio must be in (0, 1]")
+
+
 @dataclass(frozen=True)
 class Model:
     """A concrete model. Future modules can be added through extra_modules."""
@@ -114,6 +148,11 @@ class InferenceWorkload:
     context_length: int
     parallel: Parallel = field(default_factory=Parallel)
     precision: Precision = field(default_factory=Precision)
+    cache: CacheSpec = field(default_factory=CacheSpec)
+
+    @property
+    def cache_hit_rate(self) -> float:
+        return self.cache.hit_rate
 
 
 @dataclass(frozen=True)
@@ -158,6 +197,7 @@ class Demand:
     communication_bytes: float = 0.0
     optimizer_bytes: float = 0.0
     gradient_bytes: float = 0.0
+    cache_load_bytes: float = 0.0
 
     @property
     def total_flops(self) -> float:
@@ -171,6 +211,7 @@ class Demand:
             + self.kv_cache_bytes
             + self.activation_bytes
             + self.communication_bytes
+            + self.cache_load_bytes
         )
 
     @property

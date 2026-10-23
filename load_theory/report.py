@@ -16,6 +16,10 @@ METRICS = [
 
 
 def _format_value(value) -> str:
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return value
     if isinstance(value, dict) and "value" in value and "unit" in value:
         return f"{value['value']:.6g} {value['unit']}"
     return f"{value:.6g}"
@@ -32,6 +36,10 @@ def print_report(report: dict) -> None:
             print("  end-to-end total demand:")
             for key, value in scenario["total"].items():
                 print(f"    {key:28s} {_format_value(value)}")
+            if "cache" in scenario:
+                print("  cache:")
+                for key, value in scenario["cache"].items():
+                    print(f"    {key:28s} {_format_value(value)}")
         elif "per_output_token" in scenario:
             print("  per-output-token demand:")
             for key, value in scenario["per_output_token"].items():

@@ -1,0 +1,21 @@
+{
+  "source_trace": "/Users/zhouchuansai/.claude/projects/-Users-zhouchuansai-Desktop-code-agents-workloads/9d9bf09c-d8ad-428e-9e06-1cd2c60ebbf6.jsonl",
+  "model_call_count": 1710,
+  "input_tokens": 3696087,
+  "cache_creation_tokens": 0,
+  "cache_read_tokens": 161264320,
+  "output_tokens": 1458923,
+  "skipped_events": {
+    "non_assistant": 2807,
+    "sidechain": 0,
+    "missing_usage": 0,
+    "non_positive_input": 1,
+    "non_positive_output": 0
+  },
+  "conversion": {
+    "new_input_length": "input_tokens + cache_creation_input_tokens",
+    "context_before_length": "cache_read_input_tokens",
+    "cached_length": "cache_read_input_tokens",
+    "output_length": "output_tokens"
+  }
+}

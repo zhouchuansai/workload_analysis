@@ -29,6 +29,7 @@ def main() -> None:
                 decode_batch_size=scenario.inference.decode_batch_size,
                 decode_length=scenario.inference.decode_length,
                 context_length=scenario.inference.context_length,
+                cache=scenario.inference.cache,
                 parallel=scenario.parallel,
                 precision=scenario.precision,
             ),

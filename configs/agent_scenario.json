@@ -1,0 +1,43 @@
+{
+  "name": "tool_agent_4_round",
+  "batch_size": 1,
+  "cache_load_scope": "once",
+  "cache": {
+    "hit_rate": 0.0,
+    "source": "remote_node",
+    "load_required": true,
+    "entry_count": 1,
+    "block_size": 16,
+    "compression_ratio": 0.5
+  },
+  "turns": [
+    {
+      "name": "initial_plan",
+      "new_input_length": 2048,
+      "output_length": 256,
+      "context_before_length": 0,
+      "cached_length": 0
+    },
+    {
+      "name": "tool_observation_1",
+      "new_input_length": 512,
+      "output_length": 128,
+      "context_before_length": 2304,
+      "cached_length": 2304
+    },
+    {
+      "name": "tool_observation_2",
+      "new_input_length": 1024,
+      "output_length": 192,
+      "context_before_length": 2944,
+      "cached_length": 2944
+    },
+    {
+      "name": "final_answer",
+      "new_input_length": 768,
+      "output_length": 160,
+      "context_before_length": 4160,
+      "cached_length": 4160
+    }
+  ]
+}
